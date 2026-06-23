@@ -41,7 +41,33 @@ DEFAULTS = {
     "cmems_file": Path(f"/data/{getpass.getuser()}/Tamar_pyGETM/data/tamar_boundary_conditions_2023-01-01_2023-01-31.nc"),
     "era5_file": Path(f"/data/{getpass.getuser()}/Tamar_pyGETM/data/era5_2023.nc"),
     "TPXO9_dir": Path(f"/data/TPXO9/"),
+    "fabm_file": None,
     }
+river_config = {
+    # EMORID default naming (used in most of the original files)
+    "emorid": {
+        "index": "site",  # integer index
+        "name": "site_name",  # name
+        "lat": "lat",  # latitude column / coordinate name
+        "lon": "lon",  # longitude column / coordinate name
+        "Q": "Q",  # discharge (flow) variable
+        "Qmean": "Q_mean",  # discharge (flow) variable
+        "N3_n": "NO3", # nitrate load in N/day
+        "N4_n": "NH4", # ammonium load in N/day
+        "N1_p": "PO4", # phosphate load in P/day
+        "N5_s": "Si", # silicate load in Si/day
+        "O3_TA": "TALK", # total alkalinity load in mol/day?
+        "O3_c": "DIC", # dissolved inorganic carbon load in mol/day?
+    },
+    # TODO: fix the names for the JRC rivers
+    "jrc": {
+        "lat": "Latitude",
+        "lon": "Longitude",
+        "Q": "discharge",
+        "Qmean": "QQQQan",
+    },
+}
+
 class MySimulation(pygetm.Simulation):
     def __init__(self, *args, initial, **kwargs):
         self.initial = initial
@@ -263,6 +289,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULTS.get("TPXO9_dir", None),
         help="Path to TPXO9 tidal data directory",
     )
+    # fabm_file 
+    parser.add_argument(
+        "--fabm-file",
+        type=Path,
+        default=DEFAULTS.get("fabm_file", None),
+        help="Path to FABM configuration file (YAML)",
+    )
     return parser
 
 def main():
@@ -382,7 +415,8 @@ def main():
         gotm=Path(".") / "gotm.yaml",
         Dcrit=0.5,
         Dmin=0.1,
-            initial=True,
+            initial=True, # to apply ramping to open boundary conditions at the start of the simulation, if using restart file set to False
+        fabm=args.fabm_file
         )
     # sim = pygetm.Simulation(
     #     domain,
@@ -397,14 +431,14 @@ def main():
     for river in sim.rivers.values():
             output_river_file = river_file.parent / (args.estuary_name + "_river.nc")
             if output_river_file.exists():
-                river_xr = xr.open_dataset(output_river_file, decode_times=time_coder)
+                tamar = xr.open_dataset(output_river_file, decode_times=time_coder)
                 # On reload
-                coord_names = river_xr.attrs.pop("extra_coords").split(",")
-                river_xr = river_xr.set_coords(coord_names)
+                coord_names = tamar.attrs.pop("extra_coords").split(",")
+                tamar = tamar.set_coords(coord_names)
                 # set time as a coordinate if it is not already
-                if "time" not in river_xr.coords:
-                    river_xr = river_xr.assign_coords(time=("time", river_xr.time.values))
-                river.flow.set(river_xr.Q)
+                if "time" not in tamar.coords:
+                    tamar = tamar.assign_coords(time=("time", tamar.time.values))
+                river.flow.set(tamar.Q)
             else:
                 # Tamar or lat lon river 
                 river_xr = xr.open_dataset(river_file)
@@ -431,7 +465,15 @@ def main():
             if sim.runtype == pygetm.RunType.BAROCLINIC:
                 river["salt"].set(0.5)
                 river["temp"].set(10.0)
-
+            if sim.fabm:
+                # set river fabm tracer variables 
+                vars2process = ["N3_n", "N4_n", "N1_p", "N5_s"] # , "O3_TA", "O3_c"]
+                for var in vars2process:
+                    if river_config["emorid"][var] in tamar.data_vars:
+                        river[var].set(tamar[river_config["emorid"][var]])
+                    else:
+                        sim.logger.warning(f"Variable {var} not found in river data file")
+                        # river[var].set(0.0)
     # setup airsea to constant values too
     if type(airsea) == pygetm.airsea.FluxesFromMeteo:
         if era_5_file:
@@ -545,7 +587,9 @@ def main():
             # sim.salt.open_boundaries.values.set(35.)
     # set initial zt to 1m everywhere
     # sim.zt.set(1.0)
-
+    if sim.fabm:
+        sim.fabm.get_dependency("mole_fraction_of_carbon_dioxide_in_air").set(400.0)
+        sim.fabm.get_dependency("mass_concentration_of_silt").set(0.0)
     sim.logger.info("Setting up output")
 
     output = sim.output_manager.add_netcdf_file(str(Path(args.output_data_dir) / (args.estuary_name +  "_" + output_prefix + "_2d.nc")), interval=output_interval2D, sync_interval=100)
