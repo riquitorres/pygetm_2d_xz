@@ -37,7 +37,7 @@ DEFAULTS = {
     "end_date": "2023-01-31",
     "output_data_dir": Path(f"/data/{getpass.getuser()}/Tamar_pyGETM/output/"),
     "output_fig_dir": Path(f"/data/{getpass.getuser()}/Tamar_pyGETM/figures/"),
-    "river_file": Path(f"/data/{getpass.getuser()}/Tamar_pyGETM/data/EMORID_1990_2024.nc"),
+    "river_file": Path(f"/data/{getpass.getuser()}/Tamar_pyGETM/data/EMORID_1993_2024_conc_nemo_TALK_DIC.nc"),
     "cmems_file": Path(f"/data/{getpass.getuser()}/Tamar_pyGETM/data/tamar_boundary_conditions_2023-01-01_2023-01-31.nc"),
     "era5_file": Path(f"/data/{getpass.getuser()}/Tamar_pyGETM/data/era5_2023.nc"),
     "TPXO9_dir": Path(f"/data/TPXO9/"),
@@ -205,9 +205,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--plot-mesh",
-        type=float,
-        default=0.12,
-        help="Line width for mesh edges",
+        action="store_true",
+        help="Plot the domain mesh ",
     )
     # start and end date
     parser.add_argument(
@@ -396,18 +395,38 @@ def main():
     #     Dmin=0.1,
     # )
     for river in sim.rivers.values():
-            # Tamar or lat lon river 
-            river_xr = xr.open_dataset(river_file)
-            riv_lon = river_xr.lon.values
-            riv_lat = river_xr.lat.values
-            dist = np.sqrt((riv_lon - river_lon)**2 + (riv_lat - river_lat)**2)
-            closest_index = np.argmin(dist)
-            tamar = river_xr.isel(site=closest_index)
-            # convert time to cftime if it is not already in that format
-            ts = (tamar.time.values.astype("datetime64[s]") - np.datetime64("1970-01-01", "s")) / np.timedelta64(1, "s")
-            cftime_dates = cftime.num2date(ts, "seconds since 1970-01-01", calendar="gregorian")
-            tamar["time"] = cftime_dates
-            river.flow.set(tamar.Q)
+            output_river_file = river_file.parent / (args.estuary_name + "_river.nc")
+            if output_river_file.exists():
+                river_xr = xr.open_dataset(output_river_file, decode_times=time_coder)
+                # On reload
+                coord_names = river_xr.attrs.pop("extra_coords").split(",")
+                river_xr = river_xr.set_coords(coord_names)
+                # set time as a coordinate if it is not already
+                if "time" not in river_xr.coords:
+                    river_xr = river_xr.assign_coords(time=("time", river_xr.time.values))
+                river.flow.set(river_xr.Q)
+            else:
+                # Tamar or lat lon river 
+                river_xr = xr.open_dataset(river_file)
+                riv_lon = river_xr.lon.values
+                riv_lat = river_xr.lat.values
+                dist = np.sqrt((riv_lon - river_lon)**2 + (riv_lat - river_lat)**2)
+                closest_index = np.argmin(dist)
+                tamar = river_xr.isel(site=closest_index)
+                # convert time to cftime if it is not already in that format
+                ts = (tamar.time.values.astype("datetime64[s]") - np.datetime64("1970-01-01", "s")) / np.timedelta64(1, "s")
+                cftime_dates = cftime.num2date(ts, "seconds since 1970-01-01", calendar="gregorian")
+                # Keep time as an explicit coordinate so it is serialized as a coordinate.
+                tamar = tamar.assign_coords(time=("time", cftime_dates))
+                # copy attributes from the original dataset to the new dataset
+                tamar.attrs = river_xr.attrs
+                # save tamar file if it doesn't already exist
+                coord_names = [k for k in tamar.coords if k not in tamar.dims]
+                if not output_river_file.exists():
+                    # Materialize non-dimension coordinates as variables in the file.
+                    # This ensures scalar coords (e.g. lon/lat after isel) are preserved.
+                    tamar.reset_coords().assign_attrs(extra_coords=",".join(coord_names)).to_netcdf(output_river_file)
+                river.flow.set(tamar.Q)
             # river.flow.set(10)
             if sim.runtype == pygetm.RunType.BAROCLINIC:
                 river["salt"].set(0.5)
@@ -555,7 +574,7 @@ def main():
     # open the netcdf file and plot the surface elevation at the final time step
     # plot 
 
-    ds = xr.open_dataset(output_prefix + "_2d.nc")
+    ds = xr.open_dataset(Path(args.output_data_dir) / (args.estuary_name + "_" + output_prefix + "_2d.nc"))
     # resample to min of plot_interval and output interval
     ds = ds.resample(time=min(plot_interval, output_interval2D)).nearest()
     # calculate distance along main channel with reference to the first node in the 2D slice
