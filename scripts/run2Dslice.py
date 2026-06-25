@@ -543,45 +543,19 @@ def main():
         )
         if sim.runtype == pygetm.RunType.BAROCLINIC:
             sim.open_boundaries.sponge.tmrlx = True
+            # file has already been post-process to have only one point in the boundary, so we can just use it directly
             cmems = xr.open_dataset(cmems_file, decode_times=time_coder)
-            # temp = xr.open_dataset(Path(cmems_file.format(var="temp", nemovar="thetao")), decode_times=time_coder)
-            # salt = xr.open_dataset(Path(cmems_file.format(var="sal", nemovar="so")), decode_times=time_coder)
-            # # find non-nan grid point closest to the boundary point and set the boundary temp to that value
-            # lon_mesh, lat_mesh = np.meshgrid(temp.longitude.values, temp.latitude.values)
-            # dist = np.sqrt((lon_mesh - bdy_lon.values)**2 + (lat_mesh - bdy_lat.values)**2).flatten()
-            # # find first non-nan value in temp that is closest to the boundary point
-            # temp_flat = temp.thetao.values[0,0,...].flatten()
-            # valid_dist = np.where(~np.isnan(temp_flat), dist, np.inf)
-            # closest_index = np.argmin(valid_dist)   
-            # j, i = np.unravel_index(closest_index, temp.thetao.values[0,0,...].shape)
-            # # extract and fill any nans with nearest depth value
-            # temp_series = temp.isel(longitude=i, latitude=j).thetao.ffill(dim="depth")
-            # # temp_seriesB = temp.isel(longitude=i, latitude=j-1).thetao.ffill(dim="depth")
-            # # temp_series = xr.concat([temp_seriesA, temp_seriesB], dim="latitude")
-            # # # reorder to time, depth latitude, longitude
-            # # temp_series = temp_series.transpose("time", "depth", "latitude")
-            # # # restore lat and lon coordinates to temp and salt so they can be used in the open boundary conditions
-            # # temp = temp.assign_coords(longitude=temp.longitude.values, latitude=temp.latitude.values)
-            # # extent temp dimension to include at least 1 for lat and lon
-            # temp_series = temp_series.expand_dims({"bdy": [1]}, axis=1)
-
-            # # temp_series = temp_series.expand_dims({"longitude": [temp_series.longitude.values],"latitude": [temp_series.latitude.values]}, axis=(2,3))
-            # # temp_series.latitude.attrs = temp.latitude.attrs
-            # # temp_series.longitude.attrs = temp.longitude.attrs
-            # salt_series = salt.isel(longitude=i, latitude=j).so.ffill(dim="depth")
-            # # salt_series.latitude.attrs = salt.latitude.attrs
-            # # salt_series.longitude.attrs = salt.longitude.attrs
-            # # salt_series = salt_series.expand_dims({"longitude": [salt_series.longitude.values], "latitude": [salt_series.latitude.values] }, axis=(2,3))
-
-            # salt_series = salt_series.expand_dims({"bdy": [1]}, axis=1)
-            # # drop latitude and longitude coordinates from temp and salt series so they can be used in the open boundary conditions
-            # temp_series = temp_series.drop_vars(["latitude", "longitude"])
-            # salt_series = salt_series.drop_vars(["latitude", "longitude"])
             sim.temp.open_boundaries.type= pygetm.SPONGE
             sim.salt.open_boundaries.type= pygetm.SPONGE
-            sim.temp.open_boundaries.values.set(cmems['temperature'])#, on_grid = True)
-            sim.salt.open_boundaries.values.set(cmems['salinity'])#, on_grid = True)
-
+            sim.temp.open_boundaries.values.set(cmems['temp'])#, on_grid = True)
+            sim.salt.open_boundaries.values.set(cmems['salt'])#, on_grid = True)
+            if sim.fabm:
+                for varname in ["N3_n", "P1_c", "N4_n","N1_p", "N5_s"]: #"O2_o","O3_c",
+                    if varname in cmems.data_vars:
+                        sim[varname].open_boundaries.type= pygetm.SPONGE
+                        sim[varname].open_boundaries.values.set(pygetm.input.from_nc(cmems_file, varname), on_grid=True)#, on_grid = True)
+                    else:
+                        sim.logger.warning(f"Variable {varname} not found in CMEMS data file")
             # set open_boundary temp and salt to constant values
             # sim.temp.open_boundaries.values.set(13.6)
             # sim.salt.open_boundaries.values.set(35.)
@@ -598,7 +572,9 @@ def main():
     output.request("uk", "vk", "tke", "num", "nuh", "eps", grid=sim.T)
     if sim.runtype == pygetm.pygetm.RunType.BAROCLINIC:
         output.request("temp", "salt", grid=sim.T)
-
+    if sim.fabm:
+        output.request("N3_n", "P1_c", "B1_c","O2_o","O3_c","N4_n","N1_p", "N5_s", grid=sim.T)
+    sim.logger.info("Starting simulation")
     sim.start(
         starttime,
         timestep=timestep,
@@ -824,6 +800,22 @@ def main():
         vmax=vmax,
         output= Path(args.output_fig_dir) / (args.estuary_name + "_" + output_prefix + "_along_axis_velocity_transect.mp4")
     )
+
+    animate_transect(
+        distance2d,
+        ds3d.zct[:, :, 0, :],
+        ds3d.N3_n[:, :, 0, :],
+        ds3d.time.values,
+        "Nitrate",
+        units="mmol N/m^3",
+        cmap=cmocean.cm.balance,
+        vmin=-vmax,
+        vmax=vmax,
+        output= Path(args.output_fig_dir) / (args.estuary_name + "_" + output_prefix + "_nitrate_transect.mp4")
+    )
+
+
+
     distance2di = np.tile(ds.distance.values, (ds3d.zft.shape[1], 1))
 
     animate_transect(
@@ -836,6 +828,8 @@ def main():
         cmap=cmocean.cm.matter,
         output= Path(args.output_fig_dir) / (args.estuary_name + "_" + output_prefix + "_tke.mp4")
     )
+
+
     plt.close('all')
 
 if __name__ == "__main__":
