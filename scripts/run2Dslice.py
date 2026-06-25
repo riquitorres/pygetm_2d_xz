@@ -512,8 +512,8 @@ def main():
                     sim.airsea.rh.set(era5_xr["rh"])
                 sim.airsea.tcc.set(era5_xr["tcc"])
                 sim.airsea.tp.set(era5_xr["tp"] / 3600.0)
-                sim.airsea.u10.set(0.0)
-                sim.airsea.v10.set(0.0)
+                # sim.airsea.u10.set(0.0)
+                # sim.airsea.v10.set(0.0)
                 for river in sim.rivers.values():
                     river["temp"].set(era5_xr["t2m"])
         else:
