@@ -489,33 +489,33 @@ def main():
                 sim.airsea.u10.set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "u10"))
                 sim.airsea.v10.set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "v10"))
                 sim.airsea.sp.set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "sp"))
-                sim.airsea.t2m.set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "t2m") - 273.15)
+                sim.airsea.t2m.set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "t2m")) # igotm already converts to degC
                 if humidity_measure == pygetm.HumidityMeasure.DEW_POINT_TEMPERATURE:
-                    sim.airsea.d2m.set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "d2m") - 273.15)
+                    sim.airsea.d2m.set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "d2m")) # igotm already converts to degC
                 elif humidity_measure == pygetm.HumidityMeasure.RELATIVE_HUMIDITY:
                     sim.airsea.rh.set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "rh"))
                 sim.airsea.tcc.set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "tcc"))
                 sim.airsea.tp.set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "tp") / 3600.0)
                 for river in sim.rivers.values():
-                    river["temp"].set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "t2m") - 273.15)
+                    river["temp"].set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "t2m") )
             else:
                 era5_xr = xr.open_dataset(era_5_file, decode_times=time_coder)
                 # Winds from era5 offshore are too large for the estuary... we should scale them down a bit... maybe compare them with Penlee winds from the observatory or WRF outputs from PML
                 # scale down the winds by a factor of 10 for now
-                sim.airsea.u10.set(era5_xr["u10"]*0.1)
-                sim.airsea.v10.set(era5_xr["v10"]*0.1)
+                sim.airsea.u10.set(era5_xr["u10"]*0.5)
+                sim.airsea.v10.set(era5_xr["v10"]*0.5)
                 sim.airsea.sp.set(era5_xr["sp"])
-                sim.airsea.t2m.set(era5_xr["t2m"] - 273.15)
+                sim.airsea.t2m.set(era5_xr["t2m"]) # igotm already converts to degC
                 if humidity_measure == pygetm.HumidityMeasure.DEW_POINT_TEMPERATURE:
-                    sim.airsea.d2m.set(era5_xr["d2m"] - 273.15)
+                    sim.airsea.d2m.set(era5_xr["d2m"]) # igotm already converts to degC
                 elif humidity_measure == pygetm.HumidityMeasure.RELATIVE_HUMIDITY:
                     sim.airsea.rh.set(era5_xr["rh"])
                 sim.airsea.tcc.set(era5_xr["tcc"])
                 sim.airsea.tp.set(era5_xr["tp"] / 3600.0)
-                # sim.airsea.u10.set(0.0)
-                # sim.airsea.v10.set(0.0)
+                sim.airsea.u10.set(0.0)
+                sim.airsea.v10.set(0.0)
                 for river in sim.rivers.values():
-                    river["temp"].set(era5_xr["t2m"] - 273.15)
+                    river["temp"].set(era5_xr["t2m"])
         else:
             sim.airsea.t2m.set(15.0)
             sim.airsea.u10.set(0.0)
