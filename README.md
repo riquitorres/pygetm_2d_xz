@@ -29,6 +29,19 @@ To only download the forcing data use
 python  -i download_forcing.py --estuary-name tamar --start-date 1994-01-01 --end-date 2025-12-31 --download-cmems-data --download-era5-data
 ```
 
+The ERA5 individual files won't be accepted to pygetm with wild card for multiyear simulations because they don't have spatial dimensions (they are single point timeseries if downloaded with igotm) so one needs to concatenate the files first.
+Substitude the years below to the ones you have in the system.
+
+```bash
+
+# 1) Make time a record (unlimited) dimension in each file
+for f in era5_{1994..2023}.nc; do
+  ncks -O --mk_rec_dmn time "$f" "rec_$f"
+done
+
+# 2) Concatenate
+ncrcat rec_era5_{1994..2023}.nc era5_1994_2023.nc
+```
 
 
 To run the model and generate a few plots use
@@ -36,3 +49,5 @@ To run the model and generate a few plots use
 ```bash
 python -i run2Dslice.py --estuary-name tamar --start-date 2023-01-01 --end-date 2023-01-03  --fabm-file fabm-ersemv2004.yaml --cmems-file /data/rt/Tamar_pyGETM/data/tamar_boundary_conditions_1994-01-01_2025-12-31.nc 
 ```
+
+Next, we should look at the latest ERSEM, compile pyGETM with it and use the more uptodate parameterisation.... 

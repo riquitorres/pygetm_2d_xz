@@ -198,7 +198,12 @@ if __name__ == "__main__":
             sys.argv = ["igotm",  str(bdy_lon),  str(bdy_lat), str(year), os.path.join(args.output_data_dir, f"era5_{year}.nc")]
             runpy.run_module("pygetm.input.igotm", run_name="__main__")
             # alternatively, you can call the function directly
-
+        # if multiple years concatenate the files 
+        import xarray as xr, glob
+        files = sorted(glob.glob(str(args.output_data_dir / "era5_????.nc")))
+        ds = xr.open_mfdataset(files, combine="by_coords")
+        ds.to_netcdf(str(args.output_data_dir / f"era5_{start_date.year}_{end_date.year}.nc"))
 
     # save the centerline, distance along channel and depths to a pickle for later use
     # python plot_transect.py --mesh ../tamar_v0/tamar_v2_grd.dat  --transect-pickle ../transect_grid/tamar_v2_transect.pk --channel-key "channel_nodes"  --out-png ../tamar_axial_50m.png
+

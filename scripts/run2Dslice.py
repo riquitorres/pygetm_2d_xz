@@ -337,7 +337,11 @@ def main():
     ddl = 1
 
     plot_period = (starttime, endtime)
-    plot_interval = datetime.timedelta(hours=1)
+    # if plot period interval longer than 1 month reduce the plotting frequency to every 12 hours
+    if (endtime - starttime).days > 30:
+        plot_interval = datetime.timedelta(hours=12)
+    else:
+        plot_interval = datetime.timedelta(hours=1)
     output_interval2D = datetime.timedelta(hours=1)
     output_interval3D = datetime.timedelta(hours=1)
     # load geojson of the domain to get the distance along the main channel for the 2D slice
@@ -477,27 +481,41 @@ def main():
     # setup airsea to constant values too
     if type(airsea) == pygetm.airsea.FluxesFromMeteo:
         if era_5_file:
-            era5_xr = xr.open_dataset(era_5_file, decode_times=time_coder)
-            if era5_xr['t2m'].units == "degree_Kelvin" or "kelvin" in era5_xr['t2m'].units.lower():
-                era5_xr['t2m'] = era5_xr['t2m'] - 273.15
-            sim.airsea.t2m.set(era5_xr["t2m"])
-            for river in sim.rivers.values():
-                river["temp"].set(era5_xr["t2m"])
-
-            # sim.airsea.u10.set(era5_xr["u10"])
-            # sim.airsea.v10.set(era5_xr["v10"])
-            sim.airsea.sp.set(era5_xr["sp"])
-            if humidity_measure == pygetm.HumidityMeasure.DEW_POINT_TEMPERATURE:
-                if era5_xr['d2m'].units == "degree_Kelvin" or "kelvin" in era5_xr['d2m'].units.lower():
-                    era5_xr['d2m'] = era5_xr['d2m'] - 273.15
-                sim.airsea.d2m.set(era5_xr["d2m"])
-            elif humidity_measure == pygetm.HumidityMeasure.RELATIVE_HUMIDITY:
-                sim.airsea.rh.set(era5_xr["rh"])
-            sim.airsea.tcc.set(era5_xr["tcc"])
-            sim.airsea.tp.set(era5_xr["tp"] / 3600.0)
-            sim.airsea.u10.set(0.0)
-            sim.airsea.v10.set(0.0)
-
+            print("Using ERA5 atmospheric forcing from file: directory", era_5_file.parent, "filename", era_5_file.name)        
+            # check if era5 filename has a range of years in it (len is longer than era5_1994.nc) and if so, use the wildcard to match all files in the range
+            if len(era_5_file.name) < 14:
+                era5_path = era_5_file.parent
+                # Winds from era5 offshore are too large for the estuary... we should scale them down a bit... maybe compare them with Penlee winds from the observatory or WRF outputs from PML
+                sim.airsea.u10.set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "u10"))
+                sim.airsea.v10.set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "v10"))
+                sim.airsea.sp.set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "sp"))
+                sim.airsea.t2m.set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "t2m") - 273.15)
+                if humidity_measure == pygetm.HumidityMeasure.DEW_POINT_TEMPERATURE:
+                    sim.airsea.d2m.set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "d2m") - 273.15)
+                elif humidity_measure == pygetm.HumidityMeasure.RELATIVE_HUMIDITY:
+                    sim.airsea.rh.set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "rh"))
+                sim.airsea.tcc.set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "tcc"))
+                sim.airsea.tp.set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "tp") / 3600.0)
+                for river in sim.rivers.values():
+                    river["temp"].set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "t2m") - 273.15)
+            else:
+                era5_xr = xr.open_dataset(era_5_file, decode_times=time_coder)
+                # Winds from era5 offshore are too large for the estuary... we should scale them down a bit... maybe compare them with Penlee winds from the observatory or WRF outputs from PML
+                # scale down the winds by a factor of 10 for now
+                sim.airsea.u10.set(era5_xr["u10"]*0.1)
+                sim.airsea.v10.set(era5_xr["v10"]*0.1)
+                sim.airsea.sp.set(era5_xr["sp"])
+                sim.airsea.t2m.set(era5_xr["t2m"] - 273.15)
+                if humidity_measure == pygetm.HumidityMeasure.DEW_POINT_TEMPERATURE:
+                    sim.airsea.d2m.set(era5_xr["d2m"] - 273.15)
+                elif humidity_measure == pygetm.HumidityMeasure.RELATIVE_HUMIDITY:
+                    sim.airsea.rh.set(era5_xr["rh"])
+                sim.airsea.tcc.set(era5_xr["tcc"])
+                sim.airsea.tp.set(era5_xr["tp"] / 3600.0)
+                # sim.airsea.u10.set(0.0)
+                # sim.airsea.v10.set(0.0)
+                for river in sim.rivers.values():
+                    river["temp"].set(era5_xr["t2m"] - 273.15)
         else:
             sim.airsea.t2m.set(15.0)
             sim.airsea.u10.set(0.0)
@@ -808,9 +826,7 @@ def main():
         ds3d.time.values,
         "Nitrate",
         units="mmol N/m^3",
-        cmap=cmocean.cm.balance,
-        vmin=-vmax,
-        vmax=vmax,
+        cmap=cmocean.cm.matter,
         output= Path(args.output_fig_dir) / (args.estuary_name + "_" + output_prefix + "_nitrate_transect.mp4")
     )
 
