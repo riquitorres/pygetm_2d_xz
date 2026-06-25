@@ -471,7 +471,7 @@ def main():
                 river["temp"].set(10.0)
             if sim.fabm:
                 # set river fabm tracer variables 
-                vars2process = ["N3_n", "N4_n", "N1_p", "N5_s"] # , "O3_TA", "O3_c"]
+                vars2process = ["N3_n", "N4_n", "N1_p", "N5_s",  "O3_c"] #"O3_TA",
                 for var in vars2process:
                     if river_config["emorid"][var] in tamar.data_vars:
                         river[var].set(tamar[river_config["emorid"][var]])
@@ -591,7 +591,7 @@ def main():
     if sim.runtype == pygetm.pygetm.RunType.BAROCLINIC:
         output.request("temp", "salt", grid=sim.T)
     if sim.fabm:
-        output.request("N3_n", "P1_c", "B1_c","O2_o","O3_c","N4_n","N1_p", "N5_s", grid=sim.T)
+        output.request("N3_n", "P1_c", "B1_c","O2_o","O3_c","N4_n","N1_p", "N5_s", "O3_TA", "O3_pCO2", "Z4_c", grid=sim.T)
     sim.logger.info("Starting simulation")
     sim.start(
         starttime,
