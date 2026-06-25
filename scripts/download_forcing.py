@@ -16,7 +16,7 @@ import cmems_download as cmems
 
 import matplotlib.pyplot as plt
 import geopandas as gpd
-
+import xarray as xr
 import numpy as np
 
 from setup_2D_model import build_parser, DEFAULTS
@@ -207,3 +207,11 @@ if __name__ == "__main__":
     # save the centerline, distance along channel and depths to a pickle for later use
     # python plot_transect.py --mesh ../tamar_v0/tamar_v2_grd.dat  --transect-pickle ../transect_grid/tamar_v2_transect.pk --channel-key "channel_nodes"  --out-png ../tamar_axial_50m.png
 
+    # load era5 concatenated file and plot the time series of the meteorological variables for the period of interest
+    ds = xr.open_dataset(str(args.output_data_dir / f"era5_1994_2023.nc"))
+    for var in ["t2m", "u10", "v10", "sp", "tp", "tcc", "d2m"]:
+        plt.figure(figsize=(12, 6))
+        ds[var].sel(time=slice(start_date, end_date)).plot()
+        plt.title(f"{var} from ERA5 reanalysis")
+        plt.savefig(args.output_fig_dir / f"era5_{var}_{start_date.year}_{end_date.year}.png")
+        plt.close()
