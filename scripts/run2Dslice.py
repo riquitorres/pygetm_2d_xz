@@ -3,6 +3,7 @@
 import argparse
 import csv
 import datetime
+import logging
 from pathlib import Path
 import cftime
 import numpy as np
@@ -95,7 +96,7 @@ class MySimulation(pygetm.Simulation):
             self.airsea.taux.all_values *= ramp
             self.airsea.tauy.all_values *= ramp
             self.airsea.shf.all_values *= ramp
-            self.airsea.sp.all_values = 101325.0 * ramp + self.airsea.sp.all_values * (1 - ramp)
+            # self.airsea.sp.all_values = 101325.0 * ramp + self.airsea.sp.all_values * (1 - ramp)
             self.airsea.pe.all_values *= ramp
             self.rivers.flow *= ramp
         super()._update_forcing_and_diagnostics(macro_active)
@@ -301,7 +302,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main():
     parser = build_parser()
     args = parser.parse_args()
+    logger = pygetm.logger.Logger(level=pygetm.logger.INFO)
 
+    file_handler = logging.FileHandler(args.output_data_dir / (args.estuary_name + "_run.log"))
+    file_handler.setLevel(logging.INFO)
+
+    # Use the same formatter as the existing handlers if desired
+    if logger.handlers:
+        file_handler.setFormatter(logger.handlers[0].formatter)
+
+    logger.addHandler(file_handler)
     # create output directories if they don't exist
     args.output_data_dir.mkdir(parents=True, exist_ok=True)
     args.output_fig_dir.mkdir(parents=True, exist_ok=True)
@@ -388,10 +398,11 @@ def main():
                 Dgamma=1,
                 gamma_surf=ddu >= ddl,
                 hmin=1.0,
+                chmin=1.0,
                 vfilter=0.10,
                 hfilter=0.10,
-                cNN=1,
-                drho=4,
+                cNN=2,
+                drho=3,
                 timescale=2.0 * 3600.0,
             )
 
@@ -420,7 +431,8 @@ def main():
         Dcrit=0.5,
         Dmin=0.1,
             initial=True, # to apply ramping to open boundary conditions at the start of the simulation, if using restart file set to False
-        fabm=args.fabm_file
+        fabm=args.fabm_file,
+        logger=logger,
         )
     # sim = pygetm.Simulation(
     #     domain,
@@ -468,7 +480,7 @@ def main():
             # river.flow.set(10)
             if sim.runtype == pygetm.RunType.BAROCLINIC:
                 river["salt"].set(0.5)
-                river["temp"].set(10.0)
+                # river["temp"].set(10.0)
             if sim.fabm:
                 # set river fabm tracer variables 
                 vars2process = ["N3_n", "N4_n", "N1_p", "N5_s",  "O3_c"] #"O3_TA",
@@ -478,6 +490,10 @@ def main():
                     else:
                         sim.logger.warning(f"Variable {var} not found in river data file")
                         # river[var].set(0.0)
+                # set river fabm tracer variables to follow target cell instead of the default 0 
+                vars2follow = ["O2_o", "O3_bioalk" ] #"O3_TA",
+                for var in vars2follow:
+                    river[var].follow_target_cell = True
     # setup airsea to constant values too
     if type(airsea) == pygetm.airsea.FluxesFromMeteo:
         if era_5_file:
@@ -496,8 +512,8 @@ def main():
                     sim.airsea.rh.set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "rh"))
                 sim.airsea.tcc.set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "tcc"))
                 sim.airsea.tp.set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "tp") / 3600.0)
-                for river in sim.rivers.values():
-                    river["temp"].set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "t2m") )
+                # for river in sim.rivers.values():
+                #     river["temp"].set(pygetm.input.from_nc(str(era5_path / "era5_????.nc"), "t2m") )
             else:
                 era5_xr = xr.open_dataset(era_5_file, decode_times=time_coder)
                 # Winds from era5 offshore are too large for the estuary... we should scale them down a bit... maybe compare them with Penlee winds from the observatory or WRF outputs from PML
@@ -583,7 +599,7 @@ def main():
         sim.fabm.get_dependency("mole_fraction_of_carbon_dioxide_in_air").set(400.0)
         sim.fabm.get_dependency("mass_concentration_of_silt").set(0.0)
     sim.logger.info("Setting up output")
-
+    sim.output_manager.add_restart(str(Path(args.output_data_dir) / (args.estuary_name + "_" + output_prefix + "_restart.nc")), interval=datetime.timedelta(months=1), sync_interval=100)
     output = sim.output_manager.add_netcdf_file(str(Path(args.output_data_dir) / (args.estuary_name +  "_" + output_prefix + "_2d.nc")), interval=output_interval2D, sync_interval=100)
     output.request("zt", "u1", "v1","u10", "v10", "sp", "swr","shf","t2m","d2m", grid=sim.T)
     output = sim.output_manager.add_netcdf_file(str(Path(args.output_data_dir) / (args.estuary_name + "_" + output_prefix + "_3d.nc")), interval=output_interval3D, sync_interval=50)
