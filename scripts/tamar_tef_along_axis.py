@@ -34,9 +34,12 @@ Dependencies: numpy, xarray, pandas, scipy, pytef  (pip install pytef)
 import argparse
 import csv
 import warnings
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import xarray as xr
+import matplotlib.pyplot as plt
+from matplotlib import animation
 from pyTEF.calc import calc_bulk_values
 
 # ── CONFIG ─────────────────────────────────────────────────────────────────────
@@ -63,11 +66,166 @@ SIGN_U     = 1            # multiply u by this to make positive = INTO estuary (
 
 def load_data(path: str) -> xr.Dataset:
     """Open dataset with minimal decoding to keep memory manageable."""
-    ds = xr.open_dataset(path, chunks={VAR["time"]: 24}).squeeze("yt", drop=True)
+    ds = xr.open_dataset(path, chunks={VAR["time"]: 24})
+    if "yt" in ds.dims and ds.sizes["yt"] == 1:
+        ds = ds.squeeze("yt", drop=True)
     # calculate dz
     if VAR["dz"] is None or VAR["dz"] not in ds:
         ds[VAR["dz"]] = ds['zft'].diff(dim='zi', label='lower').rename({'zi': VAR["z"]})
     return ds
+
+
+def plot_transect_time_means(ds_out: xr.Dataset, plot_dir: Path):
+    """Create one time-mean transect plot per TEF bulk variable."""
+    plot_dir.mkdir(parents=True, exist_ok=True)
+
+    var_specs = {
+        "Qin": ("Qin", "m3 s-1"),
+        "Qout": ("Qout", "m3 s-1"),
+        "sin": ("sin", "PSU"),
+        "sout": ("sout", "PSU"),
+    }
+
+    x_vals = ds_out["distance"].values
+    for var, (label, units) in var_specs.items():
+        y = ds_out[var].mean(dim="time", skipna=True).values
+        fig, ax = plt.subplots(figsize=(11, 4.5), constrained_layout=True)
+        ax.plot(x_vals, y, lw=2.0, color="tab:blue")
+        ax.set_title(f"{label} transect mean over all times")
+        ax.set_xlabel("Along-axis distance x [m]")
+        ax.set_ylabel(f"{label} [{units}]")
+        ax.grid(True, alpha=0.3)
+        out_path = plot_dir / f"{var}_transect_time_mean.png"
+        fig.savefig(out_path, dpi=180)
+        plt.close(fig)
+    # plot the average Q(S) profile
+    Q_profile = ds_out["Q_profile"].mean(dim="time", skipna=True).values  # (x, s_iface)
+    s_iface = ds_out["s_iface"].values
+    fig, ax = plt.subplots(figsize=(11, 4.5), constrained_layout=True)
+    for xi in range(len(x_vals)):
+        ax.plot(s_iface, Q_profile[xi], lw=1.0, alpha=0.5, label=f"x={x_vals[xi]:.0f} m")
+    ax.set_title("Mean Q(S) profile over all times")
+    ax.set_xlabel("Salinity [PSU]")
+    ax.set_ylabel("Integrated transport Q(S) [m3 s-1]")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best", fontsize="small", ncol=2)
+    out_path = plot_dir / "Q_profile_transect_time_mean.png"
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+    # plot a transect with z as s_iface and color as Q(S)
+    fig, ax = plt.subplots(figsize=(11, 4.5), constrained_layout=True)
+    # mask Q_profile values of 0 to nan
+    Q_profile_masked = np.where(np.isclose(Q_profile, 0.0), np.nan, Q_profile)
+    c = ax.pcolormesh(x_vals, s_iface, Q_profile_masked.T, shading="auto", cmap="RdBu_r")
+    fig.colorbar(c, ax=ax, label="Integrated transport Q(S) [m3 s-1]")
+    ax.set_title("Mean Q(S) transect over all times")
+    ax.set_xlabel("Along-axis distance x [m]")
+    ax.set_ylabel("Salinity [PSU]")
+    out_path = plot_dir / "Q_profile_transect_time_mean_colormap.png"
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+
+def _time_label(time_values: np.ndarray, idx: int) -> str:
+    """Consistent timestamp label for animation titles."""
+    ts = pd.Timestamp(time_values[idx])
+    return ts.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def create_transect_animations(ds_out: xr.Dataset, plot_dir: Path, fps: int = 6):
+    """Create per-time-step transect GIF animations for TEF bulk variables."""
+    plot_dir.mkdir(parents=True, exist_ok=True)
+
+    var_specs = {
+        "Qin": ("Qin", "m3 s-1", "tab:green"),
+        "Qout": ("Qout", "m3 s-1", "tab:red"),
+        "sin": ("sin", "PSU", "tab:blue"),
+        "sout": ("sout", "PSU", "tab:orange"),
+    }
+
+    x_vals = ds_out["distance"].values
+    t_vals = ds_out["time"].values
+
+    for var, (label, units, color) in var_specs.items():
+        arr = ds_out[var].values  # (x, time)
+        n_time = arr.shape[1]
+        finite = np.isfinite(arr)
+        if not np.any(finite):
+            warnings.warn(f"Skipping animation for {var}: all values are NaN")
+            continue
+
+        y_min = np.nanmin(arr)
+        y_max = np.nanmax(arr)
+        if np.isclose(y_min, y_max):
+            y_pad = max(1e-6, 0.1 * abs(y_max) + 1e-6)
+        else:
+            y_pad = 0.05 * (y_max - y_min)
+
+        fig, ax = plt.subplots(figsize=(11, 4.5), constrained_layout=True)
+        line, = ax.plot([], [], lw=2.0, color=color)
+        ax.set_xlim(float(np.nanmin(x_vals)), float(np.nanmax(x_vals)))
+        ax.set_ylim(float(y_min - y_pad), float(y_max + y_pad))
+        ax.set_xlabel("Along-axis distance x [m]")
+        ax.set_ylabel(f"{label} [{units}]")
+        ax.grid(True, alpha=0.3)
+
+        def init():
+            line.set_data([], [])
+            ax.set_title(f"{label} transect | initializing")
+            return (line,)
+
+        def update(frame_idx):
+            line.set_data(x_vals, arr[:, frame_idx])
+            ax.set_title(f"{label} transect | t = {_time_label(t_vals, frame_idx)}")
+            return (line,)
+
+        ani = animation.FuncAnimation(
+            fig,
+            update,
+            frames=n_time,
+            init_func=init,
+            blit=True,
+            repeat=False,
+        )
+
+        out_path = plot_dir / f"{var}_transect_animation.gif"
+        ani.save(out_path, writer=animation.PillowWriter(fps=fps))
+        plt.close(fig)
+
+
+def plot_from_processed_file(
+    processed_file: str,
+    output_2d_file: str,
+    plot_dir: str,
+    make_animations: bool = False,
+    animation_fps: int = 6,
+):
+    """Generate transect plots/animations from an existing TEF output file."""
+    ds_out = xr.open_dataset(processed_file)
+    missing = [v for v in ("Qin", "Qout", "sin", "sout", "x", "time") if v not in ds_out]
+    if missing:
+        raise ValueError(
+            f"Processed file is missing required TEF variables: {', '.join(missing)}"
+        )
+    # add distance from the 2d output file coordinate if not present 
+    if "distance" not in ds_out:
+        ds = xr.open_dataset(Path(output_2d_file))
+        x = ds.xt.values
+        y = ds.yt.values
+        distance = np.cumsum(np.sqrt(np.diff(x, axis=1)**2 + np.diff(y, axis=1)**2), axis=1)/1000
+        ds = ds.assign_coords(distance=("distance", np.concatenate(([0],distance.squeeze()))))
+        # create the distance with s_bin coordinate
+        distance2d = np.tile(ds.distance.values, (ds_out.Q_profile.shape[-1], 1)).T
+        print(distance2d.shape)
+        ds_out = ds_out.assign_coords(distance=("x", ds.distance.values))
+        ds_out = ds_out.assign_coords(distance2d=(("x", "s_iface"), distance2d))
+        ds.close()
+
+    out_dir = Path(plot_dir)
+    print(f"Writing transect time-mean plots to {out_dir}")
+    plot_transect_time_means(ds_out, out_dir)
+    if make_animations:
+        print(f"Writing transect animations to {out_dir}")
+        create_transect_animations(ds_out, out_dir, fps=animation_fps)
 
 
 def get_layer_thickness(ds: xr.Dataset) -> xr.DataArray:
@@ -227,12 +385,17 @@ def extract_bulk_values(
     return dict(Qin=Qin, Qout=Qout, sin=sin, sout=sout)
 
 
-def run_tef(input_path: str, output_path: str, freq: str, depth_file: str):
+def run_tef(
+    input_path: str,
+    output_path: str,
+    freq: str,
+    depth_file: str,
+    plot_dir: str | None = None,
+    make_animations: bool = False,
+    animation_fps: int = 6,
+):
     print(f"Opening {input_path}")
     ds = load_data(input_path)
-    # remove yt dimension if present (not needed for 2D slice)
-    if "yt" in ds.dims:
-        ds = ds.drop_vars("yt")
     times  = pd.DatetimeIndex(ds[VAR["time"]].values)
     x_vals = ds[VAR["x"]].values
     nx     = len(x_vals)
@@ -355,6 +518,15 @@ def run_tef(input_path: str, output_path: str, freq: str, depth_file: str):
     )
 
     ds_out.to_netcdf(output_path)
+
+    if plot_dir:
+        out_dir = Path(plot_dir)
+        print(f"Writing transect time-mean plots to {out_dir}")
+        plot_transect_time_means(ds_out, out_dir)
+        if make_animations:
+            print(f"Writing transect animations to {out_dir}")
+            create_transect_animations(ds_out, out_dir, fps=animation_fps)
+
     print("Done.")
     return ds_out
 
@@ -365,16 +537,54 @@ def parse_args():
     p = argparse.ArgumentParser(
         description="TEF analysis along the estuary axis of a 2D x/z slice model."
     )
-    p.add_argument("--input",  required=True, help="Path to model NetCDF output")
-    p.add_argument("--output", required=True, help="Path for TEF results NetCDF")
-    p.add_argument("--depth_file", required=True, help="Path to CSV file containing depth information")
+    p.add_argument("--input",  default=None, help="Path to model NetCDF output")
+    p.add_argument("--output", default=None, help="Path for TEF results NetCDF")
+    p.add_argument("--depth_file", default=None, help="Path to CSV file containing depth information")
+    p.add_argument("--processed_file", default=None,
+                   help="Path to an existing TEF NetCDF file to plot without recomputing.")
     p.add_argument("--freq",   default="MS",
                    help="Pandas resample frequency alias (default: MS = month-start). "
                         "Examples: W (weekly), QS (quarterly), AS (annual), "
                         "30D (30-day windows), 12h (12-hourly — tidal average)")
+    p.add_argument("--plot_dir", default=None,
+                   help="Directory to write transect plots (PNG).")
+    p.add_argument("--animations", action="store_true",
+                   help="If set, write per-time-step transect GIF animations.")
+    p.add_argument("--animation_fps", type=int, default=6,
+                   help="Frames per second for GIF animations (default: 6).")
+    p.add_argument("--output_2d_file", default=None,
+                   help="Path to the 2D output file used to compute distance along the axis.")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    run_tef(args.input, args.output, args.freq, args.depth_file)
+    if args.processed_file:
+        if not args.plot_dir:
+            raise ValueError("--plot_dir is required when using --processed_file")
+        plot_from_processed_file(
+            args.processed_file,
+            args.output_2d_file,
+            args.plot_dir,
+            make_animations=args.animations,
+            animation_fps=args.animation_fps,
+        )
+    else:
+        missing_args = [
+            name for name, value in
+            (("--input", args.input), ("--output", args.output), ("--depth_file", args.depth_file))
+            if value is None
+        ]
+        if missing_args:
+            raise ValueError(
+                f"Missing required arguments for TEF processing: {', '.join(missing_args)}"
+            )
+        run_tef(
+            args.input,
+            args.output,
+            args.freq,
+            args.depth_file,
+            plot_dir=args.plot_dir,
+            make_animations=args.animations,
+            animation_fps=args.animation_fps,
+        )
