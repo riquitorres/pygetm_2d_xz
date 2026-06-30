@@ -66,6 +66,7 @@ DEFAULTS = {
     "check_polygons_plot": False,
     "download_cmems_data": False,
     "download_era5_data": False,
+    "quantile_depth": 0.95,
 }
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Create estuary setup for 2D model")
@@ -378,7 +379,7 @@ if __name__ == "__main__":
         # Use the FVCOM mesh to estimate the mean depth for each wet cell by intersecting the FVCOM elements with the wet cells and calculating the area-weighted mean depth for each cell. 
         # This is needed to get a more accurate estimate of the depth for each cell based on the intersection with the coastline
         # build triangle polygons from node coordinates
-        wet_cells_gdf, fvcom_proj, min_depth, all_pieces = mga.get_fvcom_elements_depths(mesh=mesh, wet_cells_gdf=wet_cells_gdf, cells_proj=cells_proj)
+        wet_cells_gdf, fvcom_proj, min_depth, all_pieces = mga.get_fvcom_elements_depths(mesh=mesh, wet_cells_gdf=wet_cells_gdf, cells_proj=cells_proj, quantile=DEFAULTS['quantile_depth'])
         # save element pieces for plotting/QGIS
         pieces_gdf = gpd.GeoDataFrame(all_pieces, crs=fvcom_proj.crs)
         # remove depth offset from depths
