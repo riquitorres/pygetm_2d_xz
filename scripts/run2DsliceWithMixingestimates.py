@@ -97,475 +97,6 @@ def setup_logging(
 
     return logger
 
-class MySimulation(pygetm.Simulation):
-    _MIXING_STAGE_ORDER = {
-        "pre_state_update": 0,
-        "micro_momentum_2d": 1,
-        "micro_surface_elevation": 2,
-        "macro_fabm_sources": 3,
-        "macro_freshwater_inputs": 4,
-        "macro_update_depth": 5,
-        "macro_momentum_3d": 6,
-        "macro_vertical_mixing": 7,
-        "macro_tracer_transport": 8,
-        "post_state_update": 9,
-        "post_forcing_update": 10,
-    }
-
-    def __init__(
-        self,
-        *args,
-        initial,
-        enable_mixing_diagnostics=False,
-        mixing_log_interval=1,
-        mixing_tracers=("salt",),
-        mixing_include_micro=False,
-        **kwargs,
-    ):
-        self.initial = initial
-        self.enable_mixing_diagnostics = enable_mixing_diagnostics
-        self.mixing_log_interval = max(1, int(mixing_log_interval))
-        self.mixing_tracers = tuple(mixing_tracers)
-        self.mixing_include_micro = mixing_include_micro
-        self._mixing_macro_counter = 0
-        self._mixing_records = []
-        super().__init__(*args, **kwargs)
-
-    def _get_tracer_object(self, tracer_name):
-        if not hasattr(self, tracer_name):
-            return None
-        return getattr(self, tracer_name)
-
-    def _tracer_moment(self, tracer_name):
-        tracer = self._get_tracer_object(tracer_name)
-        if tracer is None:
-            return {
-                "mean": np.nan,
-                "variance": np.nan,
-                "second_moment": np.nan,
-                "volume": np.nan,
-                "content": np.nan,
-                "variance_content": np.nan,
-            }
-
-        values = getattr(tracer, "all_values", None)
-        if values is None:
-            return {
-                "mean": np.nan,
-                "variance": np.nan,
-                "second_moment": np.nan,
-                "volume": np.nan,
-                "content": np.nan,
-                "variance_content": np.nan,
-            }
-
-        finite_mask = np.isfinite(values)
-        if not np.any(finite_mask):
-            return {
-                "mean": np.nan,
-                "variance": np.nan,
-                "second_moment": np.nan,
-                "volume": np.nan,
-                "content": np.nan,
-                "variance_content": np.nan,
-            }
-
-        # Prefer volume-weighted moments where possible.
-        area = getattr(tracer.grid, "_area", None)
-        hn = getattr(getattr(tracer.grid, "hn", None), "all_values", None)
-        if area is not None and hn is not None:
-            try:
-                vol = hn * area
-                mask = finite_mask & np.isfinite(vol) & (vol > 0.0)
-                if np.any(mask):
-                    w = vol[mask]
-                    x = values[mask]
-                    total_volume = np.sum(w)
-                    mean = np.sum(w * x) / total_volume
-                    second_moment = np.sum(w * x**2) / total_volume
-                    variance = second_moment - mean**2
-                    content = np.sum(w * x)
-                    variance_content = total_volume * variance
-                    return {
-                        "mean": float(mean),
-                        "variance": float(variance),
-                        "second_moment": float(second_moment),
-                        "volume": float(total_volume),
-                        "content": float(content),
-                        "variance_content": float(variance_content),
-                    }
-            except Exception:
-                pass
-
-        x = values[finite_mask]
-        mean = float(np.mean(x))
-        variance = float(np.var(x))
-        second_moment = float(np.mean(x**2))
-        sample_count = float(x.size)
-        return {
-            "mean": mean,
-            "variance": variance,
-            "second_moment": second_moment,
-            "volume": sample_count,
-            "content": float(np.sum(x)),
-            "variance_content": float(sample_count * variance),
-        }
-
-    def _record_mixing_stage(self, stage, macro_active):
-        if not self.enable_mixing_diagnostics:
-            return
-        if (not macro_active) and (not self.mixing_include_micro):
-            return
-        if macro_active and self._mixing_macro_counter % self.mixing_log_interval != 0:
-            return
-
-        for tracer_name in self.mixing_tracers:
-            stats = self._tracer_moment(tracer_name)
-            self._mixing_records.append(
-                {
-                    "time": self.time,
-                    "istep": int(self.istep),
-                    "macro_step": int(self._mixing_macro_counter),
-                    "macro_active": bool(macro_active),
-                    "stage": stage,
-                    "tracer": tracer_name,
-                    "mean": stats["mean"],
-                    "variance": stats["variance"],
-                    "second_moment": stats["second_moment"],
-                    "volume": stats["volume"],
-                    "content": stats["content"],
-                    "variance_content": stats["variance_content"],
-                }
-            )
-
-    def _build_budget_tables(self, records_df):
-        df = records_df.copy()
-        if df.empty:
-            return {
-                "budget": pd.DataFrame(),
-                "stage_summary": pd.DataFrame(),
-                "tidal_summary": pd.DataFrame(),
-                "spring_neap_summary": pd.DataFrame(),
-            }
-
-        df["stage_order"] = df["stage"].map(self._MIXING_STAGE_ORDER).fillna(999)
-        df = df.sort_values(["tracer", "macro_step", "istep", "stage_order"])
-
-        grouped = df.groupby(["tracer", "macro_step"], sort=False)
-        df["prev_stage"] = grouped["stage"].shift(1)
-        df["prev_variance"] = grouped["variance"].shift(1)
-        df["prev_variance_content"] = grouped["variance_content"].shift(1)
-        df["ref_variance"] = grouped["variance"].transform("first")
-        df["ref_variance_content"] = grouped["variance_content"].transform("first")
-        df["delta_variance"] = df["variance"] - grouped["variance"].shift(1)
-        df["delta_second_moment"] = (
-            df["second_moment"] - grouped["second_moment"].shift(1)
-        )
-        df["delta_content"] = df["content"] - grouped["content"].shift(1)
-        df["delta_volume"] = df["volume"] - grouped["volume"].shift(1)
-        df["delta_variance_content"] = (
-            df["variance_content"] - grouped["variance_content"].shift(1)
-        )
-        budget = df[df["prev_stage"].notna()].copy()
-
-        eps = 1e-12
-        budget["delta_variance_norm_prev"] = np.where(
-            np.abs(budget["prev_variance"]) > eps,
-            budget["delta_variance"] / budget["prev_variance"],
-            np.nan,
-        )
-        budget["delta_variance_norm_ref"] = np.where(
-            np.abs(budget["ref_variance"]) > eps,
-            budget["delta_variance"] / budget["ref_variance"],
-            np.nan,
-        )
-        budget["delta_variance_content_norm_ref"] = np.where(
-            np.abs(budget["ref_variance_content"]) > eps,
-            budget["delta_variance_content"] / budget["ref_variance_content"],
-            np.nan,
-        )
-
-        budget["cum_delta_variance"] = budget.groupby(
-            ["tracer", "macro_step"], sort=False
-        )["delta_variance"].cumsum()
-        budget["cum_delta_variance_norm_ref"] = np.where(
-            np.abs(budget["ref_variance"]) > eps,
-            budget["cum_delta_variance"] / budget["ref_variance"],
-            np.nan,
-        )
-
-        step_totals = (
-            df.groupby(["tracer", "macro_step"], as_index=False)
-            .agg(
-                step_initial_variance=("variance", "first"),
-                step_final_variance=("variance", "last"),
-                step_initial_variance_content=("variance_content", "first"),
-                step_final_variance_content=("variance_content", "last"),
-            )
-            .assign(
-                step_total_delta_variance=lambda x: x["step_final_variance"]
-                - x["step_initial_variance"],
-                step_total_delta_variance_content=lambda x: x[
-                    "step_final_variance_content"
-                ]
-                - x["step_initial_variance_content"],
-            )
-        )
-        budget = budget.merge(step_totals, on=["tracer", "macro_step"], how="left")
-        budget["stage_fraction_of_step_variance_change"] = np.where(
-            np.abs(budget["step_total_delta_variance"]) > eps,
-            budget["delta_variance"] / budget["step_total_delta_variance"],
-            np.nan,
-        )
-        budget["stage_fraction_of_step_variance_content_change"] = np.where(
-            np.abs(budget["step_total_delta_variance_content"]) > eps,
-            budget["delta_variance_content"]
-            / budget["step_total_delta_variance_content"],
-            np.nan,
-        )
-
-        stage_summary = budget.groupby(["tracer", "stage"], as_index=False).agg(
-            mean_delta_variance=("delta_variance", "mean"),
-            sum_delta_variance=("delta_variance", "sum"),
-            mean_delta_variance_content=("delta_variance_content", "mean"),
-            sum_delta_variance_content=("delta_variance_content", "sum"),
-            mean_delta_variance_norm_prev=("delta_variance_norm_prev", "mean"),
-            mean_delta_variance_norm_ref=("delta_variance_norm_ref", "mean"),
-            sum_delta_variance_norm_ref=("delta_variance_norm_ref", "sum"),
-            mean_delta_variance_content_norm_ref=(
-                "delta_variance_content_norm_ref",
-                "mean",
-            ),
-            sum_delta_variance_content_norm_ref=(
-                "delta_variance_content_norm_ref",
-                "sum",
-            ),
-            mean_stage_fraction_of_step_variance_change=(
-                "stage_fraction_of_step_variance_change",
-                "mean",
-            ),
-            mean_stage_fraction_of_step_variance_content_change=(
-                "stage_fraction_of_step_variance_content_change",
-                "mean",
-            ),
-            samples=("delta_variance", "size"),
-        )
-
-        tidal_summary = pd.DataFrame()
-        spring_neap_summary = pd.DataFrame()
-        budget["time"] = pd.to_datetime(budget["time"], errors="coerce")
-        timed = budget[budget["time"].notna()].copy()
-        if not timed.empty:
-            t0 = timed["time"].min()
-            hours = (timed["time"] - t0).dt.total_seconds() / 3600.0
-            tidal_period_hours = 12.4206012
-            spring_neap_window_hours = 14.765 * 24.0
-            timed["tidal_cycle"] = np.floor(hours / tidal_period_hours).astype(int)
-            timed["spring_neap_window"] = np.floor(
-                hours / spring_neap_window_hours
-            ).astype(int)
-
-            tidal_summary = timed.groupby(
-                ["tracer", "stage", "tidal_cycle"], as_index=False
-            ).agg(
-                mean_delta_variance=("delta_variance", "mean"),
-                sum_delta_variance=("delta_variance", "sum"),
-                mean_delta_variance_content=("delta_variance_content", "mean"),
-                sum_delta_variance_content=("delta_variance_content", "sum"),
-                mean_delta_variance_norm_ref=("delta_variance_norm_ref", "mean"),
-                sum_delta_variance_norm_ref=("delta_variance_norm_ref", "sum"),
-                mean_delta_variance_content_norm_ref=(
-                    "delta_variance_content_norm_ref",
-                    "mean",
-                ),
-                sum_delta_variance_content_norm_ref=(
-                    "delta_variance_content_norm_ref",
-                    "sum",
-                ),
-                samples=("delta_variance", "size"),
-            )
-
-            spring_neap_summary = timed.groupby(
-                ["tracer", "stage", "spring_neap_window"], as_index=False
-            ).agg(
-                mean_delta_variance=("delta_variance", "mean"),
-                sum_delta_variance=("delta_variance", "sum"),
-                mean_delta_variance_content=("delta_variance_content", "mean"),
-                sum_delta_variance_content=("delta_variance_content", "sum"),
-                mean_delta_variance_norm_ref=("delta_variance_norm_ref", "mean"),
-                sum_delta_variance_norm_ref=("delta_variance_norm_ref", "sum"),
-                mean_delta_variance_content_norm_ref=(
-                    "delta_variance_content_norm_ref",
-                    "mean",
-                ),
-                sum_delta_variance_content_norm_ref=(
-                    "delta_variance_content_norm_ref",
-                    "sum",
-                ),
-                samples=("delta_variance", "size"),
-            )
-
-        return {
-            "budget": budget,
-            "stage_summary": stage_summary,
-            "tidal_summary": tidal_summary,
-            "spring_neap_summary": spring_neap_summary,
-        }
-
-    def write_mixing_diagnostics(self, output_path):
-        if not self._mixing_records:
-            self.logger.warning("No mixing diagnostics recorded; skipping write")
-            return
-        output_path = Path(output_path)
-        records_df = pd.DataFrame(self._mixing_records)
-        records_df.to_csv(output_path, index=False)
-
-        tables = self._build_budget_tables(records_df)
-        budget_path = output_path.with_name(output_path.stem + "_budget.csv")
-        stage_path = output_path.with_name(output_path.stem + "_stage_summary.csv")
-        tidal_path = output_path.with_name(output_path.stem + "_tidal_summary.csv")
-        spring_neap_path = output_path.with_name(
-            output_path.stem + "_spring_neap_summary.csv"
-        )
-
-        tables["budget"].to_csv(budget_path, index=False)
-        tables["stage_summary"].to_csv(stage_path, index=False)
-        if not tables["tidal_summary"].empty:
-            tables["tidal_summary"].to_csv(tidal_path, index=False)
-        if not tables["spring_neap_summary"].empty:
-            tables["spring_neap_summary"].to_csv(spring_neap_path, index=False)
-
-        self.logger.info("Wrote mixing diagnostics to %s", output_path)
-        self.logger.info("Wrote stagewise budget table to %s", budget_path)
-        self.logger.info("Wrote stage summary table to %s", stage_path)
-        if not tables["tidal_summary"].empty:
-            self.logger.info("Wrote tidal-cycle summary table to %s", tidal_path)
-        if not tables["spring_neap_summary"].empty:
-            self.logger.info(
-                "Wrote spring-neap summary table to %s", spring_neap_path
-            )
-
-    def _advance_state_split(self, macro_active):
-        self.momentum.advance_depth_integrated(
-            self.timestep, self.tausx, self.tausy, self.dpdx, self.dpdy
-        )
-        self._record_mixing_stage("micro_momentum_2d", macro_active)
-
-        self.advance_surface_elevation(
-            self.timestep, self.momentum.U, self.momentum.V, self.fwf
-        )
-        self.T.z.halo_updaters[pygetm.parallel.Neighbor.ALL].start()
-
-        self._int_river_flow += self.rivers.flow * self.timestep
-
-        self.T.z.halo_updaters[pygetm.parallel.Neighbor.ALL].finish()
-        self._record_mixing_stage("micro_surface_elevation", macro_active)
-
-        if self.runtype > pygetm.RunType.BAROTROPIC_2D and macro_active:
-            if self.fabm:
-                self.fabm.advance(self.macrotimestep)
-                self._record_mixing_stage("macro_fabm_sources", macro_active)
-
-            self.add_freshwater_inputs(self.macrotimestep)
-            self._record_mixing_stage("macro_freshwater_inputs", macro_active)
-
-            self.update_depth(_3d=True, timestep=self.macrotimestep)
-            self._record_mixing_stage("macro_update_depth", macro_active)
-
-            self.momentum.advance(
-                self.macrotimestep,
-                self.split_factor,
-                self.tausxo,
-                self.tausyo,
-                self.dpdxo,
-                self.dpdyo,
-                self.internal_pressure.idpdx,
-                self.internal_pressure.idpdy,
-                self.vertical_mixing.num,
-            )
-            self._record_mixing_stage("macro_momentum_3d", macro_active)
-
-            self.vertical_mixing.advance(
-                self.macrotimestep,
-                self.ustar_s,
-                self.momentum.ustar_b,
-                self.z0s,
-                self.T.z0b,
-                self.NN,
-                self.momentum.SS,
-            )
-            self._record_mixing_stage("macro_vertical_mixing", macro_active)
-
-            self.tracers.advance(
-                self.macrotimestep,
-                self.momentum.uk,
-                self.momentum.vk,
-                self.momentum.ww,
-                self.vertical_mixing.nuh,
-            )
-            self._record_mixing_stage("macro_tracer_transport", macro_active)
-
-            if self.runtype == pygetm.RunType.BAROCLINIC and self.delay_slow_ip:
-                self.internal_pressure.idpdx.all_values.sum(
-                    axis=0, out=self.momentum.SxB.all_values
-                )
-                self.internal_pressure.idpdy.all_values.sum(
-                    axis=0, out=self.momentum.SyB.all_values
-                )
-
-    def advance_split_with_mixing(self, check_finite=False):
-        macro_updated = self.istep % self.split_factor == 0
-        self.output_manager.prepare_save(macro=macro_updated)
-
-        self.time += self.timedelta
-        self.istep += 1
-        macro_active = self.istep % self.split_factor == 0
-        if macro_active:
-            self._mixing_macro_counter += 1
-
-        if self.report != 0 and self.istep % self.report == 0:
-            self.logger.info(self.time)
-
-        self._record_mixing_stage("pre_state_update", macro_active)
-        self._advance_state_split(macro_active)
-        self._record_mixing_stage("post_state_update", macro_active)
-
-        self.input_manager.update(self.time, macro=macro_active)
-        self._update_forcing_and_diagnostics(macro_active)
-        self._record_mixing_stage("post_forcing_update", macro_active)
-
-        self.output_manager.save(self.timestep * self.istep, self.istep, self.time)
-
-        if check_finite:
-            if not self.check_finite(macro_active):
-                raise Exception("Non-finite values found")
-
-    def _update_forcing_and_diagnostics(self, macro_active: bool):
-        if self.initial:
-            # Initial ramp parameters: gradually increase boundary conditions over time
-            # to avoid shock and instabilities at simulation start
-            RAMP_DURATION_TIMESTEPS = 302000  # ~8-10 hours at 60s timestep
-            RAMP_STEEPNESS = 5.0  # Controls sigmoid curve steepness (higher = steeper)
-
-            alpha = RAMP_STEEPNESS
-            t = self.istep / RAMP_DURATION_TIMESTEPS
-            ramp = 1.0 / (1.0 + np.exp(-alpha * (t - 0.5)))  # Sigmoidal ramp function
-            # print every 10000 time steps
-            # if self.istep % 10000 == 0:
-            #     print(
-            #         "Applying ramping to open boundary conditions with ramp factor:",
-            #         ramp,
-            #     )
-            self.open_boundaries.z.all_values *= ramp
-            self.open_boundaries.u.all_values *= ramp
-            self.open_boundaries.v.all_values *= ramp
-            self.airsea.taux.all_values *= ramp
-            self.airsea.tauy.all_values *= ramp
-            self.airsea.shf.all_values *= ramp
-            # self.airsea.sp.all_values = 101325.0 * ramp + self.airsea.sp.all_values * (1 - ramp)
-            self.airsea.pe.all_values *= ramp
-            self.rivers.flow *= ramp
-        super()._update_forcing_and_diagnostics(macro_active)
 class NumericalMixingMixin:
     """
     Drop-in mixin to add online numerical mixing diagnostics to any
@@ -780,13 +311,9 @@ class NumericalMixingMixin:
         Intercept pygetm's internal tracer advance to sandwich the
         numerical mixing calculation around it.
 
-        This assumes pygetm.simulation.Simulation calls self._advance_tracers()
-        (or self.tracers.advance()) somewhere in its timestep.  If your pygetm
-        version uses a different internal name, adjust accordingly — check
-        pygetm/simulation.py for the call site.
         """
         if not getattr(self, "_nummix_ready", False):
-            # Fallback: mixin not activated, behave normally
+            # mixing not activated, behave normally
             self.tracers.advance(
                 self.macrotimestep,
                 self.momentum.uk,
@@ -805,50 +332,49 @@ class NumericalMixingMixin:
         #    (salt OBs are already set by pygetm before this call.)
         self._sync_sq_open_boundaries()
 
-        # ── 3. Advance ALL tracers (including salt_sq) through advection ───
+        # ── 3. Advance tracers and compute chi_num in Fortran advection ────
+        # Reset diagnostic accumulator once per macrotimestep; the advection
+        # operators will accumulate split-step contributions into this array.
+        self._chi_num.values.fill(0.0)
         self.tracers.advance( 
             self.macrotimestep,
             self.momentum.uk,
             self.momentum.vk,
             self.momentum.ww,
             self.vertical_mixing.nuh,
+            chi_num=self._chi_num,
+            chi_num_tracer=self.salt,
         )
 
-        # ── 4. Compute chi_num ────────────────────────────────────────────
-        #    After advance:
-        #      self._salt_values  = s_after  (advected by pygetm)
-        #      self._sq_values    = (s²)_after  (same scheme applied to s²)
-        #    Theoretical s² if advection were perfect:
-        #      sq_theoretical = s_after²
-        #    Numerical mixing = variance lost by advection scheme:
-        #      chi_num = (sq_theoretical - sq_advected) / dt  [PSU² s⁻¹]
-
-        sq_theoretical = self._salt_values ** 2
-        chi_num_step   = (sq_theoretical - self._sq_values) / self.macrotimestep
-
-        # Clip to zero: chi_num should be non-negative by construction.
-        # Small negatives can appear from floating-point round-off.
-        np.clip(chi_num_step, 0.0, None, out=chi_num_step)
+        # ── 4. Use chi_num provided by Fortran advection operators ────────
+        # NOTE: keep pygetm internal averaging (output_file.request(..., time_average=True))
+        # as the only averaging path. chi_num is already written by Fortran into
+        # self._chi_num for this timestep.
+        # chi_num_step = self._chi_num.values
 
         # ── 5. Compute chi_phy ────────────────────────────────────────────
         chi_phy_step = self._compute_chi_phy()
 
-        # ── 6. Accumulate for time-averaging ─────────────────────────────
-        self._chi_num_acc  += chi_num_step
-        self._chi_phy_acc  += chi_phy_step
-        self._nummix_count += 1
-        # flush and reset at every output interval
-        if self.istep % self._output_interval_steps == 0:
-            # self.logger.info("[nummix] flushing chi_num and chi_phy at istep %d", self.istep)
-            self._chi_num.values[...] = self._chi_num_acc / max(self._nummix_count, 1)
-            self._chi_phy.values[...] = self._chi_phy_acc / max(self._nummix_count, 1)
-            self._chi_num_acc[...]  = 0.0
-            self._chi_phy_acc[...]  = 0.0
-            self._nummix_count      = 0
-        else:
-            # self.logger.info("[nummix] accumulating chi_num and chi_phy at istep %d", self.istep)
-            self._chi_num.values[...] = self._chi_num_acc / max(self._nummix_count, 1)
-            self._chi_phy.values[...] = self._chi_phy_acc / max(self._nummix_count, 1)
+        # ── 6. Hand over instantaneous fields to pygetm output manager ─────
+        # chi_num stays in self._chi_num as produced by Fortran this step.
+        self._chi_phy.values[...] = chi_phy_step
+
+        # Manual averaging path (kept commented for easy rollback).
+        # self._chi_num_acc  += chi_num_step
+        # self._chi_phy_acc  += chi_phy_step
+        # self._nummix_count += 1
+        # # flush and reset at every output interval
+        # if self.istep % self._output_interval_steps == 0:
+        #     # self.logger.info("[nummix] flushing chi_num and chi_phy at istep %d", self.istep)
+        #     self._chi_num.values[...] = self._chi_num_acc / max(self._nummix_count, 1)
+        #     self._chi_phy.values[...] = self._chi_phy_acc / max(self._nummix_count, 1)
+        #     self._chi_num_acc[...]  = 0.0
+        #     self._chi_phy_acc[...]  = 0.0
+        #     self._nummix_count      = 0
+        # else:
+        #     # self.logger.info("[nummix] accumulating chi_num and chi_phy at istep %d", self.istep)
+        #     self._chi_num.values[...] = self._chi_num_acc / max(self._nummix_count, 1)
+        #     self._chi_phy.values[...] = self._chi_phy_acc / max(self._nummix_count, 1)
     def _sync_sq_open_boundaries(self):
         """
         Set salt_sq open boundary values to s_OB² so that the boundary
@@ -1518,7 +1044,7 @@ def main():
 
     # 3. Register the salt_sq tracer BEFORE sim.start()
     print("output interval for nummix tracer:", int(output_interval3D / datetime.timedelta(seconds=timestep)))
-    sim.add_nummix_tracer(output_interval_steps=int(output_interval3D / datetime.timedelta(seconds=timestep)))
+    sim.add_nummix_tracer(output_interval_steps=int(output_interval3D / datetime.timedelta(seconds=timestep))) # so is the same as the 3D output interval
     
     sim.add_nummix_output(output)          # adds chi_num, chi_phy, salt_sq
     print(sim.vertical_mixing.nuh)
