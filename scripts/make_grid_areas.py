@@ -349,11 +349,12 @@ def build_wet_polygons(section_proj):
                 print(f"Error: Cell {i} is still invalid after attempting to fix. Skipping this cell.")
     return cells, nodes_list
 
-def get_fvcom_elements_depths(mesh, wet_cells_gdf, cells_proj):
+def get_fvcom_elements_depths(mesh, wet_cells_gdf, cells_proj, quantile=0.85):
     """
     mesh: xarray Dataset with FVCOM mesh data (x, y, triangles, depth)
     wet_cells_gdf: GeoDataFrame with wet cells polygons
     cells_proj: GeoDataFrame with projected cells polygons
+    quantile: float, quantile to calculate for depth
     Returns: wet_cells_gdf with additional columns for mean depth and volume based on FVCOM mesh elements
     """
     triangle_polys = []
@@ -422,7 +423,7 @@ def get_fvcom_elements_depths(mesh, wet_cells_gdf, cells_proj):
             area_dict[cell_id] = area
             depth_dict[cell_id] = [piece["depth"]]
     wet_cells_gdf["element_area_m2"] = wet_cells_gdf["id"].map(area_dict)
-    wet_cells_gdf["q75_depth_m"] = wet_cells_gdf["id"].map(lambda x: np.quantile(np.array(depth_dict[x]), 0.75) if x in depth_dict else np.nan) + min_depth - 1
+    wet_cells_gdf["q_depth_m"] = wet_cells_gdf["id"].map(lambda x: np.quantile(np.array(depth_dict[x]), quantile) if x in depth_dict else np.nan) + min_depth - 1
     wet_cells_gdf["intersection_geometry"] = wet_cells_gdf["id"].map(intersect_polys)
     # add the area calculated from the intersection with the coastline (i.e. the real wet area)
     wet_cells_gdf["real_intersection_area_m2"] = cells_proj["wet_area_m2"]
@@ -437,8 +438,8 @@ if __name__ == "__main__":
     # read coastline geojson
     # coastline_shapefile = '../shapefile/ordered_coastline.geojson'
     coastline_shapefile = '../shapefile/0_depth_limited_coastline_singleline.geojsonl'
-
-    mes_file_path="../tamar_v0/tamar_v2_grd.dat"
+    quantile=0.95
+    mes_file_path="../tamar_grid/tamar_v2_grd.dat"
     # plot the sections and coastlines to check they look right
     plot_sections_and_coastline = True
     plot_polygons_interactive = False
@@ -629,7 +630,7 @@ if __name__ == "__main__":
 
     points_list = []
     for idx, row in section_proj.iterrows():
-        for pt in extract_points(row["intersection"]):
+        for pt in extract_points(row["intersection"], row.geometry):
             points_list.append({"section_id": idx, "geometry": pt})
 
     points_gdf = gpd.GeoDataFrame(points_list, crs=section_proj.crs)
@@ -792,7 +793,7 @@ if __name__ == "__main__":
             area_dict[cell_id] = area
             depth_dict[cell_id] = [piece["depth"]]
     wet_cells_gdf["element_area_m2"] = wet_cells_gdf["id"].map(area_dict)
-    wet_cells_gdf["q75_depth_m"] = wet_cells_gdf["id"].map(lambda x: np.quantile(np.array(depth_dict[x]), 0.75) if x in depth_dict else np.nan) + min_depth - 1
+    wet_cells_gdf["q_depth_m"] = wet_cells_gdf["id"].map(lambda x: np.quantile(np.array(depth_dict[x]), quantile) if x in depth_dict else np.nan) + min_depth - 1
     wet_cells_gdf["intersection_geometry"] = wet_cells_gdf["id"].map(intersect_polys)
     # add the area calculated from the intersection with the coastline (i.e. the real wet area)
     wet_cells_gdf["real_intersection_area_m2"] = cells_proj["wet_area_m2"]
@@ -845,7 +846,7 @@ if __name__ == "__main__":
     color = 'tab:green'
     ax2.set_xlabel('Section ID')
     ax2.set_ylabel('Mean Depth (m)', color=color)
-    ax2.plot(wet_cells_gdf["id"], wet_cells_gdf["q75_depth_m"], color=color, marker='o', label='Real Q75 Depth')
+    ax2.plot(wet_cells_gdf["id"], wet_cells_gdf["q_depth_m"], color=color, marker='o', label=f'Real Quantile {quantile} Depth')
     ax2.plot(wet_cells_gdf["id"], wet_cells_gdf["real_mean_depth_m"], color='tab:olive', marker='s', label='Estimated Real Mean Depth')
     ax2.plot(wet_cells_gdf["id"], wet_cells_gdf["mean_depth_m"], color='tab:olive', marker='x', label='Calculated Mean Depth')
     ax2.tick_params(axis='y', labelcolor=color)
@@ -881,7 +882,7 @@ if __name__ == "__main__":
         section_id = row["section_id"]
         nodes_dict[idx] = {"section_id": section_id, "lon": row["lon"], "lat": row["lat"], "x": row["x"], "y": row["y"]}
         try:
-            depth_dict[section_id] = {"section_id": section_id, "real_mean_depth_m": wet_cells_gdf.loc[wet_cells_gdf["id"] == section_id, "q75_depth_m"].values[0], "element_area_m2": wet_cells_gdf.loc[wet_cells_gdf["id"] == section_id, "element_area_m2"].values[0]}
+            depth_dict[section_id] = {"section_id": section_id, "real_mean_depth_m": wet_cells_gdf.loc[wet_cells_gdf["id"] == section_id, "q_depth_m"].values[0], "element_area_m2": wet_cells_gdf.loc[wet_cells_gdf["id"] == section_id, "element_area_m2"].values[0]}
         except IndexError:
             print(f"Warning: No depth found for section_id {section_id}")   
     # save nodes_dict and depth_dict as csv for use in mesh generation
